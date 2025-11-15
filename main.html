@@ -1,0 +1,931 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>3D Шутер v17.9 (ФИНАЛ: Air Control, Корректная Пауза)</title>
+    <script src="js/three.min.js"></script>
+    <script src="js/PointerLockControls.js"></script>
+    
+    <style>
+        html,body{height:100%;margin:0;background:#fff;overflow:hidden;font-family:Inter,system-ui,Segoe UI,Roboto}
+        /* Экран загрузки / Стартовый экран */
+        #overlay{
+            position:fixed;left:0;top:0;width:100%;height:100%;
+            background:rgba(0,0,0,1); transition: opacity 1.5s ease-out; 
+            display:flex;justify-content:center;align-items:center;
+            color:#e8ffe8;font-size:24px;z-index:100;
+        }
+        /* Главное меню / Меню паузы */
+        #mainMenu {
+            position: fixed; left: 0; top: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            display: none; /* Изначально скрыто */
+            flex-direction: column; justify-content: center; align-items: center;
+            z-index: 99;
+            color: white;
+            font-family: sans-serif;
+            text-align: center;
+        }
+        #menuContent {
+            background: #222; padding: 40px; border-radius: 10px;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+        }
+        #menuContent button {
+            background: #4CAF50; color: white; border: none;
+            padding: 10px 20px; margin: 10px 0; font-size: 18px;
+            cursor: pointer; border-radius: 5px; width: 200px;
+            transition: background 0.2s;
+        }
+        #menuContent button:hover {
+            background: #45a049;
+        }
+        
+        #hud {
+            position: fixed; bottom: 20px; left: 20px; color: white;
+            font-size: 18px; font-family: monospace; z-index: 10;
+            background: rgba(0, 0, 0, 0.6); padding: 10px 15px; border-radius: 8px;
+        }
+        #crosshair {
+            position: absolute; top: 50%; left: 50%; width: 10px; height: 10px;
+            margin-top: -5px; margin-left: -5px; border: 2px solid white;
+            border-radius: 50%; box-shadow: 0 0 5px rgba(255, 255, 255, 0.8);
+            z-index: 5; pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    
+    <div id="overlay">
+        Нажмите, чтобы начать игру (1 - Пистолет, 3 - Нож)
+    </div>
+
+    <div id="mainMenu">
+        <div id="menuContent">
+            <h1>ПАУЗА</h1>
+            <p>Нажмите ESC или кнопку "Продолжить", чтобы вернуться в игру.</p>
+            <button id="resumeButton">Продолжить</button>
+            <button onclick="console.log('Начать новую игру')">Новая Игра (WIP)</button>
+        </div>
+    </div>
+    
+    <div id="crosshair"></div>
+
+    <div id="hud">
+        <div id="ammoDisplay">
+            ОРУЖИЕ: <span id="weaponName">ПИСТОЛЕТ</span><br>
+            АММО: <span id="ammoCountText">15</span> / <span id="spareAmmoCountText">75</span>
+        </div>
+        <div id="staminaBar" style="width: 100px; height: 5px; background: #555; border-radius: 3px; margin-top: 5px;">
+            <div id="staminaFill" style="width: 100%; height: 100%; background: #4CAF50; border-radius: 3px;"></div>
+        </div>
+        <div id="magazineInfo" style="color: yellow; margin-top: 5px;">Нажмите R для перезарядки</div>
+    </div>
+    
+    <audio id="start-sound" src="audio/game_start.mp3"></audio>
+    <audio id="shoot-sound" src="audio/shoot.mp3"></audio>
+    <audio id="empty-click-sound" src="audio/empty_click.mp3"></audio> 
+    <audio id="reload-sound-html" src="audio/reload.mp3"></audio>
+    <audio id="jump-sound-html" src="audio/jump.mp3"></audio>
+    <audio id="knife-hit-sound" src="audio/knife_hit.mp3"></audio>
+    <audio id="enemy-hit-sound" src="audio/enemy_hit.mp3"></audio>
+    <audio id="step-sound-html" src="audio/step.mp3" loop></audio>
+
+    
+    <script>
+        // === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
+        let scene, camera, renderer, controls;
+        let objects = []; 
+        let enemies = []; 
+        let bullets = []; 
+        let canMove = false;
+        let hasGameStarted = false;
+        
+        let velocity = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+        let lastTime = performance.now();
+        let onGround = false;
+        
+        let gunMesh, knifeMesh;
+        let currentWeapon = 'gun'; 
+        
+        let isAttacking = false;
+        let attackTime = 0;
+        const ATTACK_DURATION = 0.3; 
+        const KNIFE_DAMAGE_RANGE = 2.0; 
+
+        let isSpacePressed = false; 
+        
+        const keyStates = { 'KeyW': false, 'KeyS': false, 'KeyA': false, 'KeyD': false, 'ShiftLeft': false, 'Space': false, 'KeyR': false };
+
+        // Звук
+        let startSound, shootSound, emptyClickSound, reloadSound, jumpSound, knifeHitSound, enemyHitSound, stepSound;
+        let audioContext; 
+        
+        // Оптимизация Frustum Culling
+        let frustum = new THREE.Frustum();
+        let cameraViewProjectionMatrix = new THREE.Matrix4();
+        
+        // Настройки мира
+        const CHUNK_SIZE = 40;
+        const GENERATION_RADIUS = 3; 
+        const loadedChunks = {}; 
+        
+        // Физика и Скорость
+        const PLAYER_HEIGHT = 1.8;
+        const PLAYER_RADIUS = 0.5;
+        const RUN_SPEED = 60; 
+        const WALK_SPEED = 40; 
+        const JUMP_VELOCITY = 5.0; 
+        const HORIZ_FRICTION = 10.0;
+        const AIR_ACCEL_FACTOR = 0.05; 
+        const GRAVITY = 9.8;
+        const BULLET_SPEED = 300; 
+        const BULLET_DAMAGE = 20; 
+
+        // Настройки противника
+        const CHASE_DISTANCE = 30; 
+        
+        // Боеприпасы
+        const MAGAZINE_CAPACITY = 15;
+        let ammoInMagazine = MAGAZINE_CAPACITY;
+        let spareAmmo = 75;
+        let isReloading = false;
+        const RELOAD_DURATION = 2.0; 
+        let reloadAnimTime = 0; 
+        let stamina = 100;
+        const MAX_STAMINA = 100;
+
+        // === ИНИЦИАЛИЗАЦИЯ И УПРАВЛЕНИЕ ===
+
+        function playSound(audioElement) {
+            if (audioElement) {
+                audioElement.currentTime = 0;
+                audioElement.play().catch(e => {}); 
+            }
+        }
+        
+        function setupAudio() {
+            startSound = document.getElementById('start-sound');
+            shootSound = document.getElementById('shoot-sound');
+            emptyClickSound = document.getElementById('empty-click-sound'); 
+            reloadSound = document.getElementById('reload-sound-html');
+            jumpSound = document.getElementById('jump-sound-html');
+            knifeHitSound = document.getElementById('knife-hit-sound');
+            enemyHitSound = document.getElementById('enemy-hit-sound');
+            stepSound = document.getElementById('step-sound-html'); 
+            
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        }
+
+        function setupGun() {
+            const gunGeometry = new THREE.BoxGeometry(0.1, 0.1, 0.5);
+            const gunMaterial = new THREE.MeshPhongMaterial({ color: 0x444444 });
+            gunMesh = new THREE.Mesh(gunGeometry, gunMaterial);
+            gunMesh.position.set(0.4, -0.3, -0.5); 
+            gunMesh.castShadow = true;
+            camera.add(gunMesh);
+        }
+
+        function setupKnife() {
+            const handleGeo = new THREE.CylinderGeometry(0.03, 0.03, 0.2, 16);
+            const handleMat = new THREE.MeshPhongMaterial({ color: 0x444444 }); 
+            knifeMesh = new THREE.Mesh(handleGeo, handleMat);
+            
+            const bladeGeo = new THREE.BoxGeometry(0.01, 0.3, 0.1); 
+            const bladeMat = new THREE.MeshPhongMaterial({ color: 0xc0c0c0 }); 
+            const bladeMesh = new THREE.Mesh(bladeGeo, bladeMat);
+            
+            bladeMesh.position.set(0, 0.25, 0); 
+            
+            knifeMesh.add(bladeMesh);
+            
+            knifeMesh.position.set(0.3, -0.2, -0.5); 
+            knifeMesh.rotation.set(0, -Math.PI / 8, 0); 
+            camera.add(knifeMesh);
+            
+            knifeMesh.visible = false;
+        }
+
+        function updateWeaponDisplay() {
+            document.getElementById('weaponName').innerText = currentWeapon === 'gun' ? 'ПИСТОЛЕТ' : 'НОЖ';
+            document.getElementById('ammoDisplay').style.display = currentWeapon === 'gun' ? 'block' : 'none';
+            if (currentWeapon === 'gun') updateAmmoDisplay();
+        }
+
+        function setupControls() {
+            const overlay = document.getElementById('overlay');
+            const mainMenu = document.getElementById('mainMenu');
+            const resumeButton = document.getElementById('resumeButton');
+            
+            controls = new THREE.PointerLockControls(camera, document.body);
+            // Стартуем на высоте (глаза)
+            controls.getObject().position.set(0, PLAYER_HEIGHT, 5); 
+
+            controls.addEventListener('lock', () => { 
+                canMove = true; 
+                mainMenu.style.display = 'none'; // Скрываем меню при блокировке
+
+                if (!hasGameStarted) {
+                    if (audioContext.state === 'suspended') {
+                        audioContext.resume().then(() => {
+                            playSound(startSound);
+                            hasGameStarted = true;
+                        });
+                    } else {
+                        playSound(startSound);
+                        hasGameStarted = true;
+                    }
+                }
+
+                overlay.style.opacity = 0;
+                setTimeout(() => { overlay.style.display = 'none'; }, 1500); 
+            });
+            
+            controls.addEventListener('unlock', () => { 
+                if (hasGameStarted) {
+                    mainMenu.style.display = 'flex'; // Показываем меню при паузе
+                } else {
+                    // Если игра еще не началась, показываем стартовый оверлей
+                    overlay.style.display = 'flex'; 
+                    overlay.style.opacity = 1;
+                }
+                canMove = false; // КОРРЕКТНАЯ ПАУЗА: Игра неактивна
+            });
+            
+            scene.add(controls.getObject());
+            overlay.addEventListener('click', onMouseDown, false); 
+            document.addEventListener('click', onMouseDown, false);
+            
+            // Обработчик кнопки "Продолжить"
+            resumeButton.addEventListener('click', () => {
+                controls.lock();
+            });
+
+            document.addEventListener('keydown', (event) => { 
+                if (keyStates.hasOwnProperty(event.code)) keyStates[event.code] = true;
+                
+                if (event.code === 'KeyR') startReload();
+                
+                if (event.code === 'Space') {
+                    isSpacePressed = true;
+                }
+                
+                if (event.code === 'Digit1') {
+                    currentWeapon = 'gun';
+                    gunMesh.visible = true;
+                    knifeMesh.visible = false;
+                    updateWeaponDisplay();
+                }
+                if (event.code === 'Digit3') {
+                    currentWeapon = 'knife';
+                    gunMesh.visible = false;
+                    knifeMesh.visible = true;
+                    updateWeaponDisplay();
+                }
+            });
+            document.addEventListener('keyup', (event) => { 
+                if (keyStates.hasOwnProperty(event.code)) keyStates[event.code] = false; 
+                if (event.code === 'Space') {
+                    isSpacePressed = false;
+                }
+            });
+        }
+        
+        function onMouseDown(event) {
+            if (!controls.isLocked) {
+                controls.lock(); 
+            } else if (event.button === 0) {
+                if (currentWeapon === 'gun') {
+                    if (isReloading) return;
+                    
+                    if (ammoInMagazine <= 0) {
+                        playSound(emptyClickSound); 
+                        return;
+                    }
+                    
+                    createBullet(); 
+                    playSound(shootSound); 
+                    
+                } else if (currentWeapon === 'knife' && !isAttacking) {
+                    isAttacking = true;
+                    attackTime = 0;
+                    playSound(knifeHitSound); 
+                }
+            }
+        }
+        
+        // === ОСВЕЩЕНИЕ И ОКРУЖЕНИЕ ===
+        
+        function setupEnvironment() {
+            const SKY_COLOR = 0xddddff; 
+            const FOG_NEAR = 80; 
+            const FOG_FAR = 200; 
+            scene.fog = new THREE.Fog(SKY_COLOR, FOG_NEAR, FOG_FAR); 
+            scene.background = new THREE.Color(SKY_COLOR); 
+        }
+
+        function setupLighting() {
+            const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
+            sunLight.position.set(50, 100, 50); 
+            sunLight.castShadow = true;
+            sunLight.shadow.mapSize.width = 2048;
+            sunLight.shadow.mapSize.height = 2048;
+            sunLight.shadow.camera.near = 0.5;
+            sunLight.shadow.camera.far = 200;
+            sunLight.shadow.camera.left = -100;
+            sunLight.shadow.camera.right = 100;
+            sunLight.shadow.camera.top = 100;
+            sunLight.shadow.camera.bottom = -100;
+            scene.add(sunLight);
+
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.8); 
+            scene.add(ambientLight);
+        }
+
+        // === ГЕНЕРАЦИЯ МИРА ===
+
+        function createFloor(x, z) {
+            const floorGeometry = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE);
+            const floorMaterial = new THREE.MeshLambertMaterial({ color: 0x4a7c4a, side: THREE.DoubleSide }); 
+            const floorMesh = new THREE.Mesh(floorGeometry, floorMaterial);
+            
+            floorMesh.rotation.x = -Math.PI / 2;
+            floorMesh.position.set(x * CHUNK_SIZE, 0, z * CHUNK_SIZE);
+            floorMesh.receiveShadow = true;
+            floorMesh.name = 'FloorChunk';
+            scene.add(floorMesh);
+            return floorMesh;
+        }
+
+        function createBuilding(x, z) {
+            const height = Math.random() * 50 + 10; 
+            const width = Math.random() * 8 + 4;
+            const depth = Math.random() * 8 + 4;
+
+            const geometry = new THREE.BoxGeometry(width, height, depth);
+            const material = new THREE.MeshPhongMaterial({ color: Math.random() * 0xffffff });
+            const mesh = new THREE.Mesh(geometry, material);
+            
+            mesh.position.set(
+                x * CHUNK_SIZE + Math.random() * CHUNK_SIZE - CHUNK_SIZE / 2, 
+                height / 2, 
+                z * CHUNK_SIZE + Math.random() * CHUNK_SIZE - CHUNK_SIZE / 2
+            );
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            mesh.userData.isBuilding = true;
+            scene.add(mesh);
+            objects.push(mesh);
+            return mesh;
+        }
+        
+        function createEnemyAt(x, z) {
+            const enemyGroup = new THREE.Group();
+            enemyGroup.health = 100;
+            enemyGroup.isEnemy = true;
+            
+            const bodyHeight = 1.4;
+            const legHeight = 0.5; 
+            
+            // Тело
+            const bodyGeo = new THREE.BoxGeometry(1.2, bodyHeight, 0.6); 
+            const bodyMat = new THREE.MeshLambertMaterial({ color: 0xff4500 });
+            const body = new THREE.Mesh(bodyGeo, bodyMat);
+            body.position.y = legHeight + bodyHeight / 2; 
+            body.userData.damageMultiplier = 1.0; 
+            body.castShadow = true; enemyGroup.add(body);
+
+            // Ноги
+            const legGeo = new THREE.CylinderGeometry(0.15, 0.15, legHeight, 8); 
+            const legMat = new THREE.MeshLambertMaterial({ color: 0xaa4500 });
+
+            const legL = new THREE.Mesh(legGeo, legMat);
+            legL.position.set(-0.3, legHeight / 2, 0); 
+            legL.userData.damageMultiplier = 1.0; 
+            enemyGroup.add(legL);
+
+            const legR = new THREE.Mesh(legGeo, legMat);
+            legR.position.set(0.3, legHeight / 2, 0); 
+            legR.userData.damageMultiplier = 1.0; 
+            enemyGroup.add(legR);
+
+            // Голова
+            const headRadius = 0.4;
+            const headGeo = new THREE.SphereGeometry(headRadius, 16, 16); 
+            const headMat = new THREE.MeshLambertMaterial({ color: 0x00bfff });
+            const head = new THREE.Mesh(headGeo, headMat);
+            head.position.y = legHeight + bodyHeight + headRadius / 2; 
+            head.userData.damageMultiplier = 2.0; 
+            head.castShadow = true; enemyGroup.add(head);
+            
+            enemyGroup.initialPosition = new THREE.Vector3(x, 0, z);
+            enemyGroup.position.set(x, 0, z);
+            
+            scene.add(enemyGroup);
+            enemies.push(enemyGroup);
+            objects.push(enemyGroup); 
+            return enemyGroup;
+        }
+
+        function generateChunk(cx, cz) {
+            const key = `${cx},${cz}`;
+            if (loadedChunks[key]) return;
+            loadedChunks[key] = true;
+
+            createFloor(cx, cz);
+
+            // FIX: Не спавним в (0,0)
+            if (cx === 0 && cz === 0) return;
+
+            const numBuildings = Math.floor(Math.random() * 5) + 3;
+            for (let i = 0; i < numBuildings; i++) {
+                createBuilding(cx, cz);
+            }
+            
+            const numEnemies = Math.floor(Math.random() * 2) + 1;
+             for (let i = 0; i < numEnemies; i++) {
+                const ex = cx * CHUNK_SIZE + Math.random() * CHUNK_SIZE - CHUNK_SIZE / 2;
+                const ez = cz * CHUNK_SIZE + Math.random() * CHUNK_SIZE - CHUNK_SIZE / 2;
+                createEnemyAt(ex, ez);
+            }
+        }
+
+        function checkAndGenerateChunks() {
+            const playerPos = controls.getObject().position;
+            const playerChunkX = Math.floor(playerPos.x / CHUNK_SIZE);
+            const playerChunkZ = Math.floor(playerPos.z / CHUNK_SIZE);
+
+            for (let x = playerChunkX - GENERATION_RADIUS; x <= playerChunkX + GENERATION_RADIUS; x++) {
+                for (let z = playerChunkZ - GENERATION_RADIUS; z <= playerChunkZ + GENERATION_RADIUS; z++) {
+                    generateChunk(x, z);
+                }
+            }
+        }
+        
+        // === КОЛЛИЗИИ И ФИЗИКА ===
+
+        function isCollidingHorizontal(x, z, objectsArray, radius) {
+            const checkPos = new THREE.Vector3(x, PLAYER_HEIGHT / 2, z); 
+            
+            for (const obj of objectsArray) {
+                if (obj.isEnemy || obj.name === 'FloorChunk') continue;
+
+                const bbox = new THREE.Box3().setFromObject(obj);
+                
+                const minX = bbox.min.x - radius;
+                const maxX = bbox.max.x + radius;
+                const minZ = bbox.min.z - radius;
+                const maxZ = bbox.max.z + radius;
+
+                const isVerticallyOverlapping = (checkPos.y < bbox.max.y) && (checkPos.y > bbox.min.y);
+
+                if (isVerticallyOverlapping && 
+                    checkPos.x > minX && checkPos.x < maxX && 
+                    checkPos.z > minZ && checkPos.z < maxZ) 
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function checkBuildingCollisions(oldX, oldZ, currentX, currentZ) {
+            const playerObject = controls.getObject();
+            const collisionObjects = objects.filter(o => o.userData.isBuilding || o.isEnemy);
+            
+            if (isCollidingHorizontal(currentX, currentZ, collisionObjects, PLAYER_RADIUS)) {
+                
+                if (!isCollidingHorizontal(currentX, oldZ, collisionObjects, PLAYER_RADIUS)) {
+                    playerObject.position.z = oldZ; 
+                    velocity.z = 0;
+                }
+                else if (!isCollidingHorizontal(oldX, currentZ, collisionObjects, PLAYER_RADIUS)) {
+                    playerObject.position.x = oldX; 
+                    velocity.x = 0;
+                } else {
+                    playerObject.position.x = oldX;
+                    playerObject.position.z = oldZ;
+                    velocity.x = 0;
+                    velocity.z = 0;
+                }
+            }
+        }
+        
+        function checkGroundCollision() {
+            const playerObject = controls.getObject();
+            const originPoint = playerObject.position.clone();
+
+            const raycasterDown = new THREE.Raycaster(originPoint, new THREE.Vector3(0, -1, 0), 0, (PLAYER_HEIGHT / 2) + 0.1);
+            
+            const floorObjects = scene.children.filter(obj => obj.name === 'FloorChunk' || obj.userData.isBuilding);
+            const intersectionsDown = raycasterDown.intersectObjects(floorObjects, true);
+            
+            onGround = false;
+            if (intersectionsDown.length > 0) {
+                const distance = intersectionsDown[0].distance;
+                if (distance <= (PLAYER_HEIGHT / 2) + 0.1) {
+                    onGround = true;
+                    // Только если падаем, сбрасываем скорость
+                    if (velocity.y < 0) { 
+                        velocity.y = 0;
+                        playerObject.position.y = intersectionsDown[0].point.y + (PLAYER_HEIGHT / 2);
+                    }
+                }
+            }
+            
+            if (playerObject.position.y < -50) {
+                 playerObject.position.set(0, PLAYER_HEIGHT, 0);
+                 velocity.set(0, 0, 0);
+            }
+        }
+
+
+        // === ИГРОВАЯ ЛОГИКА ===
+        
+        function updateAmmoDisplay() {
+            document.getElementById('ammoCountText').innerText = ammoInMagazine;
+            document.getElementById('spareAmmoCountText').innerText = spareAmmo;
+        }
+        
+        function startReload() {
+            // FIX: Блокируем перезарядку, если в руках не пистолет
+            if (currentWeapon !== 'gun') return; 
+
+            if (spareAmmo <= 0 || isReloading || ammoInMagazine === MAGAZINE_CAPACITY) return;
+            isReloading = true;
+            reloadAnimTime = 0; 
+            playSound(reloadSound);
+            document.getElementById('magazineInfo').innerText = "Перезарядка...";
+            
+            setTimeout(() => {
+                const needed = MAGAZINE_CAPACITY - ammoInMagazine;
+                const transfer = Math.min(needed, spareAmmo);
+                
+                ammoInMagazine += transfer;
+                spareAmmo -= transfer;
+                
+                isReloading = false;
+                gunMesh.rotation.x = 0; 
+                document.getElementById('magazineInfo').innerText = "Нажмите R для перезарядки";
+                updateAmmoDisplay();
+            }, 2000); 
+        }
+        
+        function jump() {
+            if (onGround) {
+                velocity.y = JUMP_VELOCITY;
+                onGround = false;
+                playSound(jumpSound); 
+            }
+        }
+        
+        function handleStamina(delta) {
+            const isRunning = keyStates['ShiftLeft'] && (keyStates['KeyW'] || keyStates['KeyS'] || keyStates['KeyA'] || keyStates['KeyD']);
+
+            if (isRunning) {
+                stamina = Math.max(0, stamina - 20 * delta); 
+            } else {
+                stamina = Math.min(MAX_STAMINA, stamina + 10 * delta); 
+            }
+
+            const staminaFill = document.getElementById('staminaFill');
+            staminaFill.style.width = stamina + '%';
+            staminaFill.style.backgroundColor = stamina > 30 ? '#4CAF50' : '#FF5733';
+            
+            return stamina > 0;
+        }
+        
+        function updateMovement(delta) {
+            const canRun = handleStamina(delta);
+            // Определяем максимальную скорость
+            const maxSpeed = (keyStates['ShiftLeft'] && canRun && onGround) ? RUN_SPEED : WALK_SPEED;
+            
+            // ТРЕНИЕ: Применяется только на земле
+            if (onGround) {
+                const friction = HORIZ_FRICTION * delta;
+                velocity.x -= velocity.x * friction;
+                velocity.z -= velocity.z * friction;
+            }
+            // В воздухе трение почти отсутствует, чтобы сохранить инерцию!
+
+            // Гравитация применяется всегда
+            velocity.y -= GRAVITY * delta;
+            
+            direction.z = Number(keyStates['KeyW']) - Number(keyStates['KeyS']);
+            direction.x = Number(keyStates['KeyD']) - Number(keyStates['KeyA']);
+            direction.normalize(); 
+
+            // УСКОРЕНИЕ (Движение)
+            if (keyStates['KeyW'] || keyStates['KeyS'] || keyStates['KeyA'] || keyStates['KeyD']) {
+                
+                // Коэффициент ускорения: 1.0 на земле, AIR_ACCEL_FACTOR в воздухе.
+                const accelFactor = onGround ? 1.0 : AIR_ACCEL_FACTOR; 
+                
+                let forwardWorld = new THREE.Vector3();
+                controls.getDirection(forwardWorld);
+                forwardWorld.y = 0; 
+                forwardWorld.normalize();
+
+                let rightWorld = new THREE.Vector3().setFromMatrixColumn(controls.getObject().matrix, 0);
+                rightWorld.y = 0;
+                rightWorld.normalize();
+
+                const accelerationVector = forwardWorld.multiplyScalar(direction.z)
+                                                .add(rightWorld.multiplyScalar(direction.x));
+                
+                accelerationVector.normalize().multiplyScalar(maxSpeed * delta * accelFactor);
+                
+                velocity.x += accelerationVector.x;
+                velocity.z += accelerationVector.z;
+            }
+            
+            // Auto-Hop
+            if (isSpacePressed && onGround) {
+                jump();
+            }
+        }
+
+        function createBullet() {
+             ammoInMagazine--;
+             updateAmmoDisplay();
+             
+             const bulletGeometry = new THREE.SphereGeometry(0.05, 8, 8);
+             const bulletMaterial = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+             const bullet = new THREE.Mesh(bulletGeometry, bulletMaterial);
+             
+             const startPos = controls.getObject().position.clone();
+             const directionVector = new THREE.Vector3(0, 0, -1);
+             camera.getWorldDirection(directionVector);
+             startPos.add(directionVector.clone().multiplyScalar(0.5)); 
+             bullet.position.copy(startPos);
+             
+             bullet.userData.direction = directionVector;
+             bullet.userData.velocity = directionVector.clone().multiplyScalar(BULLET_SPEED);
+             
+             scene.add(bullet);
+             bullets.push(bullet);
+        }
+
+        function handleKnifeDamage() {
+             const directionVector = new THREE.Vector3(0, 0, -1);
+             camera.getWorldDirection(directionVector);
+             
+             const raycaster = new THREE.Raycaster(controls.getObject().position, directionVector, 0, KNIFE_DAMAGE_RANGE);
+             
+             const targets = enemies.map(e => e.children).flat(); 
+
+             const intersections = raycaster.intersectObjects(targets, true);
+
+             if (intersections.length > 0) {
+                 const hitMesh = intersections[0].object;
+                 let hitEnemyGroup = hitMesh.parent;
+                 
+                 while (hitEnemyGroup && !hitEnemyGroup.isEnemy) {
+                     hitEnemyGroup = hitEnemyGroup.parent;
+                 }
+
+                 if (hitEnemyGroup) {
+                    console.log("Enemy was knifed!");
+                    
+                    scene.remove(hitEnemyGroup);
+                    objects = objects.filter(obj => obj !== hitEnemyGroup);
+                    enemies = enemies.filter(e => e !== hitEnemyGroup);
+                    
+                    playSound(enemyHitSound); 
+                 }
+                 isAttacking = false;
+             }
+        }
+        
+        function applyDamage(enemyGroup, damageAmount) {
+            enemyGroup.health -= damageAmount;
+            console.log(`Enemy hit! Health remaining: ${enemyGroup.health}`);
+            
+            if (enemyGroup.health <= 0) {
+                scene.remove(enemyGroup);
+                objects = objects.filter(obj => obj !== enemyGroup);
+                enemies = enemies.filter(e => e !== enemyGroup);
+                playSound(enemyHitSound);
+            } else {
+                enemyGroup.traverse((child) => {
+                    if (child.material) {
+                        const originalColor = child.material.color.getHex();
+                        child.material.color.setHex(0xff0000);
+                        setTimeout(() => child.material.color.setHex(originalColor), 100);
+                    }
+                });
+            }
+        }
+
+        function updateEnemies(delta) {
+            const playerPos = controls.getObject().position;
+
+            enemies.forEach(enemy => {
+                enemy.position.y = 0.0; 
+
+                const toPlayer = new THREE.Vector3().subVectors(playerPos, enemy.position);
+                const distance = toPlayer.length();
+                
+                let canSeePlayer = false;
+
+                if (distance < CHASE_DISTANCE) {
+                    const raycasterLoS = new THREE.Raycaster(enemy.position.clone().add(new THREE.Vector3(0, 1.5, 0)), toPlayer.clone().normalize(), 0, distance);
+                    const blockingObjects = objects.filter(o => o.userData.isBuilding);
+                    const intersectionsLoS = raycasterLoS.intersectObjects(blockingObjects, true);
+
+                    if (intersectionsLoS.length === 0 || intersectionsLoS[0].distance > distance) {
+                        canSeePlayer = true;
+                    }
+                }
+                
+                if (canSeePlayer) { 
+                    const moveSpeed = 3 * delta;
+                    toPlayer.normalize();
+                    
+                    const oldX = enemy.position.x;
+                    const oldZ = enemy.position.z;
+                    const nextX = enemy.position.x + toPlayer.x * moveSpeed;
+                    const nextZ = enemy.position.z + toPlayer.z * moveSpeed;
+                    
+                    const collisionObjects = objects.filter(o => o.userData.isBuilding);
+
+                    if (!isCollidingHorizontal(nextX, oldZ, collisionObjects, 0.6)) {
+                        enemy.position.x = nextX;
+                    }
+                    if (!isCollidingHorizontal(oldX, nextZ, collisionObjects, 0.6)) {
+                        enemy.position.z = nextZ;
+                    }
+
+                    enemy.lookAt(playerPos.x, enemy.position.y, playerPos.z); 
+                } 
+            });
+        }
+        
+        function updateBullets(delta) {
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                const bullet = bullets[i];
+                
+                const nextPosition = bullet.position.clone().add(bullet.userData.velocity.clone().multiplyScalar(delta));
+                
+                const rayDirection = bullet.userData.direction.clone();
+                const rayLength = bullet.userData.velocity.length() * delta;
+                
+                const raycaster = new THREE.Raycaster(bullet.position, rayDirection, 0, rayLength);
+                
+                const targets = enemies.map(e => e.children).flat(); 
+                const intersections = raycaster.intersectObjects(targets, true);
+                
+                let hitTarget = false;
+
+                if (intersections.length > 0) {
+                    const hit = intersections[0];
+                    const hitMesh = hit.object;
+                    let hitEnemyGroup = hitMesh.parent;
+                    
+                    while (hitEnemyGroup && !hitEnemyGroup.isEnemy) {
+                        hitEnemyGroup = hitEnemyGroup.parent;
+                    }
+
+                    if (hitEnemyGroup) {
+                        const damageMultiplier = hitMesh.userData.damageMultiplier || 1.0;
+                        const damage = BULLET_DAMAGE * damageMultiplier;
+                        
+                        applyDamage(hitEnemyGroup, damage);
+
+                        console.log(`Bullet Hit: ${hitMesh.name}, Multiplier: ${damageMultiplier}x, Damage: ${damage.toFixed(1)}`);
+                        hitTarget = true;
+                    }
+                }
+                
+                bullet.position.copy(nextPosition);
+
+                if (hitTarget || bullet.position.distanceTo(controls.getObject().position) > 500) {
+                    scene.remove(bullet);
+                    bullets.splice(i, 1);
+                }
+            }
+        }
+
+
+        // === Игровой цикл (Loop) ===
+        function animate(time) {
+            requestAnimationFrame(animate);
+
+            // Ограничение delta time для предотвращения "взрыва" физики
+            const delta = Math.min((time - lastTime) / 1000, 1/30);
+            
+            if (canMove) { // <-- Главный блок, который останавливает игру при паузе
+                
+                checkAndGenerateChunks();
+                
+                updateMovement(delta);
+                
+                const playerObject = controls.getObject();
+                const oldX = playerObject.position.x;
+                const oldZ = playerObject.position.z;
+                
+                // Применяем горизонтальную скорость (Инерция)
+                playerObject.position.x += velocity.x * delta;
+                playerObject.position.z += velocity.z * delta;
+                
+                const currentX = playerObject.position.x;
+                const currentZ = playerObject.position.z;
+
+                // Проверка стен
+                checkBuildingCollisions(oldX, oldZ, currentX, currentZ);
+                
+                // Применение вертикальной скорости и проверка пола
+                playerObject.position.y += velocity.y * delta;
+                checkGroundCollision(); 
+
+
+                // Анимации оружия
+                if (isReloading) {
+                    reloadAnimTime += delta;
+                    const progress = Math.min(1.0, reloadAnimTime / RELOAD_DURATION);
+                    const maxRotation = -Math.PI / 2;
+                    gunMesh.rotation.x = maxRotation * Math.sin(progress * Math.PI); 
+                }
+                
+                if (isAttacking) {
+                    attackTime += delta;
+                    const progress = Math.min(1.0, attackTime / ATTACK_DURATION);
+                    
+                    if (progress > 0.1 && progress < 0.2) {
+                        handleKnifeDamage();
+                    }
+
+                    if (progress >= 1.0 || (isAttacking === false && attackTime > 0.1)) { 
+                        isAttacking = false;
+                        knifeMesh.rotation.set(0, -Math.PI / 8, 0); 
+                        knifeMesh.position.set(0.3, -0.2, -0.5); 
+                    } else {
+                        const swingAngle = Math.sin(progress * Math.PI * 2) * (Math.PI / 6); 
+                        knifeMesh.rotation.z = swingAngle; 
+                        knifeMesh.position.x = 0.3 + Math.sin(progress * Math.PI) * 0.2; 
+                    }
+                } else if (currentWeapon === 'knife') {
+                    knifeMesh.rotation.set(0, -Math.PI / 8, 0);
+                    knifeMesh.position.set(0.3, -0.2, -0.5);
+                }
+                
+                // Обновление врагов и пуль (должно быть внутри if(canMove))
+                updateEnemies(delta); 
+                updateBullets(delta); 
+
+                // Frustum Culling
+                camera.updateMatrixWorld(); 
+                cameraViewProjectionMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+                frustum.setFromProjectionMatrix(cameraViewProjectionMatrix);
+                
+                for (const obj of objects) {
+                    const bbox = new THREE.Box3().setFromObject(obj);
+                    obj.visible = frustum.intersectsBox(bbox);
+                }
+            } // <-- Конец if (canMove)
+
+            renderer.render(scene, camera);
+            lastTime = time;
+        }
+
+        // === Инициализация ===
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            
+            setupEnvironment(); 
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.domElement.style.position = 'absolute';
+            document.body.appendChild(renderer.domElement);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+            setupAudio();         
+            setupLighting();      
+            setupGun();
+            setupKnife(); 
+            setupControls();
+            
+            checkAndGenerateChunks();
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+
+            updateAmmoDisplay();
+            updateWeaponDisplay();
+        }
+
+        // Запуск
+        window.onload = function() {
+            init();
+            animate(0);
+        };
+    </script>
+</body>
+</html>
