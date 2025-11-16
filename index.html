@@ -124,10 +124,8 @@
     <audio id="knife-hit-sound" src="audio/knife_hit.mp3"></audio>
     <audio id="enemy-hit-sound" src="audio/enemy_hit.mp3"></audio>
     <audio id="step-sound-html" src="audio/step.mp3" loop></audio>
-
-    
-    <script>
-        // === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ (ОЧИЩЕНО) ===
+    <audio id="ambient-loop-sound-html" src="audio/ambient.mp3" autoplay loop></audio> <script>
+        // === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
         let scene, camera, renderer, controls;
         let objects = []; 
         let enemies = []; 
@@ -153,7 +151,7 @@
         const keyStates = { 'KeyW': false, 'KeyS': false, 'KeyA': false, 'KeyD': false, 'ShiftLeft': false, 'Space': false, 'KeyR': false };
 
         // Звук
-        let startSound, shootSound, emptyClickSound, reloadSound, jumpSound, knifeHitSound, enemyHitSound, stepSound;
+        let startSound, shootSound, emptyClickSound, reloadSound, jumpSound, knifeHitSound, enemyHitSound, stepSound, ambientLoopSound;
         let audioContext; 
         
         // Оптимизация Frustum Culling
@@ -208,6 +206,7 @@
             knifeHitSound = document.getElementById('knife-hit-sound');
             enemyHitSound = document.getElementById('enemy-hit-sound');
             stepSound = document.getElementById('step-sound-html'); 
+            ambientLoopSound = document.getElementById('ambient-loop-sound-html'); // <-- ИСПРАВЛЕНО
             
             audioContext = new (window.AudioContext || window.webkitAudioContext)();
         }
@@ -275,6 +274,7 @@
             document.getElementById('startScreen').style.opacity = 1;
             
             stepSound.pause();
+            ambientLoopSound.pause(); // <-- PAUSE AMBIENT
             
             updateAmmoDisplay();
         }
@@ -293,16 +293,18 @@
                 isGameActive = true; 
                 mainMenu.style.display = 'none';
 
-                if (!hasGameStarted) {
-                    if (audioContext.state === 'suspended') {
-                        audioContext.resume().then(() => {
-                            playSound(startSound);
-                        });
-                    } else {
-                        playSound(startSound);
-                    }
-                    hasGameStarted = true;
+                // Запуск аудио после первого взаимодействия (для обхода блокировки браузера)
+                if (audioContext.state === 'suspended') {
+                    audioContext.resume().then(() => {
+                         ambientLoopSound.play().catch(e => {}); // <-- ЗАПУСК AMBIENT
+                         if (!hasGameStarted) playSound(startSound);
+                    });
+                } else {
+                     ambientLoopSound.play().catch(e => {}); // <-- ЗАПУСК AMBIENT
+                     if (!hasGameStarted) playSound(startSound);
                 }
+                
+                hasGameStarted = true;
                 
                 startScreen.style.opacity = 0;
                 setTimeout(() => { startScreen.style.display = 'none'; }, 500); 
@@ -313,6 +315,7 @@
                     mainMenu.style.display = 'flex';
                 }
                 stepSound.pause(); 
+                ambientLoopSound.pause(); // <-- PAUSE AMBIENT
             });
             
             scene.add(controls.getObject());
